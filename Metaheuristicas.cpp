@@ -439,14 +439,14 @@ namespace {
 constexpr double EPS = 1e-9;
 constexpr double LIMITE_TEMPO = 5.0;
 
-// Solucao candidata: rota + valores ja calculados.
+// rota + valores ja calculados
 struct Solucao {
     std::vector<int> rota;
     double pontuacao = 0.0;
     double custo = 0.0;
 };
 
-// Soma dos custos das arestas consecutivas da rota.
+// soma dos custos das arestas consecutivas da rota
 double calcular_custo(const Grafo& g, const std::vector<int>& rota)
 {
     double total = 0.0;
@@ -458,7 +458,7 @@ double calcular_custo(const Grafo& g, const std::vector<int>& rota)
     return total;
 }
 
-// Soma dos beneficios dos vertices da rota (origem e destino valem 0).
+// soma dos beneficios dos vertices da rota, com origem e destino = 0
 double calcular_pontuacao(const Grafo& g, const std::vector<int>& rota)
 {
     double total = 0.0;
@@ -470,8 +470,7 @@ double calcular_pontuacao(const Grafo& g, const std::vector<int>& rota)
     return total;
 }
 
-// Monta uma Solucao recalculando custo e pontuacao do zero,
-// o que evita acumular erro numerico por somas e subtracoes.
+// recalcula custo e pontuacao do 0
 Solucao montar_solucao(const Grafo& g, std::vector<int> rota)
 {
     Solucao s;
@@ -481,7 +480,7 @@ Solucao montar_solucao(const Grafo& g, std::vector<int> rota)
     return s;
 }
 
-// Marca quais vertices estao na rota.
+// marcar quais vertices estao na rota
 std::vector<bool> marcar_visitados(const Grafo& g, const std::vector<int>& rota)
 {
     std::vector<bool> visitado(g.numero_vertices(), false);
@@ -493,8 +492,7 @@ std::vector<bool> marcar_visitados(const Grafo& g, const std::vector<int>& rota)
     return visitado;
 }
 
-// Mesmas exigencias da busca_local: comeca na origem, termina no
-// destino, sem vertice invalido ou repetido, e dentro do orcamento.
+// omeca na origem e termina no destino
 void validar_rota_inicial(const Grafo& g, const std::vector<int>& rota)
 {
     const int n = g.numero_vertices();
@@ -535,9 +533,7 @@ bool melhor_que(const Solucao& a, const Solucao& b)
             a.custo < b.custo - EPS);
 }
 
-// theta0 = -p / ln(0.8), com p a pontuacao media dos pontos
-// turisticos (vertices internos). Assim, perder p tem 80% de
-// chance de ser aceito no inicio.
+// theta0 = -media pontos turisticos / ln(0.8)
 double temperatura_inicial(const Grafo& g)
 {
     const int n = g.numero_vertices();
@@ -554,8 +550,7 @@ double temperatura_inicial(const Grafo& g)
 
     const double media = soma / static_cast<double>(n - 2);
 
-    // Todos os beneficios nulos: nenhum Delta < 0 ocorre,
-    // mas evitamos theta = 0 por seguranca.
+    // Todos os beneficios nulos: nenhum Delta < 0 ocorre
     if (media <= 0.0) {
         return 1.0;
     }
