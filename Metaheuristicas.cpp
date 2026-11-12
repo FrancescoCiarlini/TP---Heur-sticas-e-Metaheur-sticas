@@ -1,4 +1,5 @@
 #include "Metaheuristicas.hpp"
+#include <utility>
 
 double busca(const Grafo& g,
     std::vector<int>& rota,
@@ -431,5 +432,483 @@ double ILS(
     }
 
     return pontuacaoAtual;
+}
+
+//----------------------------------------------------------------------------------------------------------------------
+namespace {
+constexpr double EPS = 1e-9;
+constexpr double LIMITE_TEMPO = 5.0;
+
+// Solucao candidata: rota + valores ja calculados.
+struct Solucao {
+    std::vector<int> rota;
+    double pontuacao = 0.0;
+    double custo = 0.0;
+};
+
+// Soma dos custos das arestas consecutivas da rota.
+double calcular_custo(const Grafo& g, const std::vector<int>& rota)
+{
+    double total = 0.0;
+
+    for (int p = 1; p < static_cast<int>(rota.size()); ++p) {
+        total += g.custo(rota[p - 1], rota[p]);
+    }
+
+    return total;
+}
+
+// Soma dos beneficios dos vertices da rota (origem e destino valem 0).
+double calcular_pontuacao(const Grafo& g, const std::vector<int>& rota)
+{
+    double total = 0.0;
+
+    for (int v : rota) {
+        total += g.beneficio(v);
+    }
+
+    return total;
+}
+
+// Monta uma Solucao recalculando custo e pontuacao do zero,
+// o que evita acumular erro numerico por somas e subtracoes.
+Solucao montar_solucao(const Grafo& g, std::vector<int> rota)
+{
+    Solucao s;
+    s.pontuacao = calcular_pontuacao(g, rota);
+    s.custo = calcular_custo(g, rota);
+    s.rota = std::move(rota);
+    return s;
+}
+
+// Marca quais vertices estao na rota.
+std::vector<bool> marcar_visitados(const Grafo& g, const std::vector<int>& rota)
+{
+    std::vector<bool> visitado(g.numero_vertices(), false);
+
+    for (int v : rota) {
+        visitado[v] = true;
+    }
+
+    return visitado;
+}
+
+// Mesmas exigencias da busca_local: comeca na origem, termina no
+// destino, sem vertice invalido ou repetido, e dentro do orcamento.
+void validar_rota_inicial(const Grafo& g, const std::vector<int>& rota)
+{
+    const int n = g.numero_vertices();
+
+    if (rota.size() < 2 ||
+        rota.front() != g.origem() ||
+        rota.back() != g.destino())
+    {
+        throw std::invalid_argument(
+            "A rota deve comecar na origem e terminar no destino."
+        );
+    }
+
+    std::vector<bool> visto(n, false);
+
+    for (int v : rota) {
+        if (v < 0 || v >= n || visto[v]) {
+            throw std::invalid_argument(
+                "A rota possui vertice invalido ou repetido."
+            );
+        }
+
+        visto[v] = true;
+    }
+
+    if (calcular_custo(g, rota) > g.limite_custo() + EPS) {
+        throw std::invalid_argument(
+            "O SA precisa receber uma rota viavel."
+        );
+    }
+}
+
+// a "melhor que" b: maior pontuacao ou, empatando, menor custo.
+bool melhor_que(const Solucao& a, const Solucao& b)
+{
+    return a.pontuacao > b.pontuacao + EPS ||
+        (std::abs(a.pontuacao - b.pontuacao) <= EPS &&
+            a.custo < b.custo - EPS);
+}
+
+// theta0 = -p / ln(0.8), com p a pontuacao media dos pontos
+// turisticos (vertices internos). Assim, perder p tem 80% de
+// chance de ser aceito no inicio.
+double temperatura_inicial(const Grafo& g)
+{
+    const int n = g.numero_vertices();
+
+    if (n <= 2) {
+        return 1.0;
+    }
+
+    double soma = 0.0;
+
+    for (int v = 1; v < n - 1; ++v) {
+        soma += g.beneficio(v);
+    }
+
+    const double media = soma / static_cast<double>(n - 2);
+
+    // Todos os beneficios nulos: nenhum Delta < 0 ocorre,
+    // mas evitamos theta = 0 por seguranca.
+    if (media <= 0.0) {
+        return 1.0;
+    }
+
+    return -media / std::log(0.8);
+}
+
+// Parametros do SA. Como o SA tem a assinatura fixa do .hpp,
+// os valores ficam aqui ate a etapa 7 (definicao dos parametros).
+constexpr int    L_SA = 1000;              // tentativas seguidas sem melhorar a melhor
+constexpr double FATOR_RESFRIAMENTO = 0.95; // alpha do TP2
+constexpr unsigned int SEMENTE_SA = 42;     // mesma semente padrao do ILS
+
+} // namespace
+
+// ---------------------------------------------------------------
+// OPERADORES DE VIZINHANCA DO SA
+// Cada operador recebe a solucao atual (que nao e alterada) e
+// preenche 'saida' com a candidata. Retorna false se nao houver
+// movimento aplicavel ou se o movimento ficar inviavel.
+// ---------------------------------------------------------------
+
+enum class Operador {
+    Insercao = 0,   // (i)   insercao gulosa
+    Remocao = 1,    // (ii)  remocao aleatoria
+    Troca = 2,      // (iii) troca aleatoria
+    DoisOpt = 3     // (iv)  2-opt guloso
+};
+
+constexpr int NUM_OPERADORES = 4;
+
+// (i) Insercao gulosa: entre as insercoes viaveis, escolhe a de maior
+// ganho de pontuacao; empatando, a de menor custo adicional.
+// Vertices de beneficio zero nao sao considerados, como na busca_local.
+bool op_insercao_gulosa(const Grafo& g,
+    const Solucao& atual,
+    Solucao& saida)
+{
+    const int n = g.numero_vertices();
+    const int m = static_cast<int>(atual.rota.size());
+    const std::vector<bool> visitado = marcar_visitados(g, atual.rota);
+
+    int melhorVertice = -1;
+    int melhorPosicao = -1;
+    double melhorGanho = -1.0;
+    double melhorDelta = 0.0;
+
+    for (int v = 0; v < n; ++v) {
+        if (visitado[v]) {
+            continue;
+        }
+
+        const double ganho = g.beneficio(v);
+
+        if (ganho <= 0.0) {
+            continue;
+        }
+
+        for (int p = 1; p < m; ++p) {
+            const int a = atual.rota[p - 1];
+            const int b = atual.rota[p];
+
+            const double delta =
+                g.custo(a, v) + g.custo(v, b) - g.custo(a, b);
+
+            if (atual.custo + delta > g.limite_custo() + EPS) {
+                continue;
+            }
+
+            if (melhorVertice == -1 ||
+                ganho > melhorGanho + EPS ||
+                (std::abs(ganho - melhorGanho) <= EPS &&
+                    delta < melhorDelta))
+            {
+                melhorVertice = v;
+                melhorPosicao = p;
+                melhorGanho = ganho;
+                melhorDelta = delta;
+            }
+        }
+    }
+
+    if (melhorVertice == -1) {
+        return false;
+    }
+
+    std::vector<int> nova = atual.rota;
+    nova.insert(nova.begin() + melhorPosicao, melhorVertice);
+
+    saida = montar_solucao(g, std::move(nova));
+    return true;
+}
+
+// (ii) Remocao aleatoria: remove um vertice interno escolhido
+// uniformemente. Origem e destino nunca saem.
+bool op_remocao_aleatoria(const Grafo& g,
+    const Solucao& atual,
+    std::mt19937& gerador,
+    Solucao& saida)
+{
+    const int m = static_cast<int>(atual.rota.size());
+
+    // Rota (origem, destino): nao ha vertice interno para remover.
+    if (m <= 2) {
+        return false;
+    }
+
+    std::uniform_int_distribution<int> sortearPosicao(1, m - 2);
+    const int posicao = sortearPosicao(gerador);
+
+    std::vector<int> nova = atual.rota;
+    nova.erase(nova.begin() + posicao);
+
+    Solucao candidata = montar_solucao(g, std::move(nova));
+
+    // Pela desigualdade triangular o custo nao aumenta, mas a
+    // checagem barata protege contra erro numerico.
+    if (candidata.custo > g.limite_custo() + EPS) {
+        return false;
+    }
+
+    saida = std::move(candidata);
+    return true;
+}
+
+// (iii) Troca aleatoria: sorteia um vertice visitado (interno) e um nao
+// visitado. Remove o visitado e insere o novo na posicao de menor custo
+// adicional da rota ja sem o removido.
+bool op_troca_aleatoria(const Grafo& g,
+    const Solucao& atual,
+    std::mt19937& gerador,
+    Solucao& saida)
+{
+    const int n = g.numero_vertices();
+    const int m = static_cast<int>(atual.rota.size());
+
+    if (m <= 2) {
+        return false;
+    }
+
+    const std::vector<bool> visitado = marcar_visitados(g, atual.rota);
+
+    std::vector<int> naoVisitados;
+
+    for (int v = 0; v < n; ++v) {
+        if (!visitado[v]) {
+            naoVisitados.push_back(v);
+        }
+    }
+
+    if (naoVisitados.empty()) {
+        return false;
+    }
+
+    std::uniform_int_distribution<int> sortearPosicao(1, m - 2);
+    std::uniform_int_distribution<int> sortearNovo(
+        0, static_cast<int>(naoVisitados.size()) - 1
+    );
+
+    const int posicaoRemovida = sortearPosicao(gerador);
+    const int novo = naoVisitados[sortearNovo(gerador)];
+
+    // Rota sem o vertice removido.
+    std::vector<int> base = atual.rota;
+    base.erase(base.begin() + posicaoRemovida);
+
+    const double custoBase = calcular_custo(g, base);
+
+    // Melhor posicao para o novo vertice na rota base.
+    int melhorPosicao = -1;
+    double melhorDelta = 0.0;
+
+    for (int p = 1; p < static_cast<int>(base.size()); ++p) {
+        const int a = base[p - 1];
+        const int b = base[p];
+
+        const double delta =
+            g.custo(a, novo) + g.custo(novo, b) - g.custo(a, b);
+
+        if (melhorPosicao == -1 || delta < melhorDelta) {
+            melhorPosicao = p;
+            melhorDelta = delta;
+        }
+    }
+
+    // Movimento inviavel: descartado.
+    if (custoBase + melhorDelta > g.limite_custo() + EPS) {
+        return false;
+    }
+
+    base.insert(base.begin() + melhorPosicao, novo);
+
+    saida = montar_solucao(g, std::move(base));
+    return true;
+}
+
+// (iv) 2-opt guloso: aplica a inversao de segmento que mais reduz o
+// custo. Retorna false se nenhuma inversao reduzir o custo.
+bool op_dois_opt_guloso(const Grafo& g,
+    const Solucao& atual,
+    Solucao& saida)
+{
+    const int m = static_cast<int>(atual.rota.size());
+
+    int melhorInicio = -1;
+    int melhorFim = -1;
+    double melhorDelta = 0.0;
+
+    for (int i = 1; i < m - 2; ++i) {
+        for (int j = i + 1; j < m - 1; ++j) {
+            const int a = atual.rota[i - 1];
+            const int b = atual.rota[i];
+            const int c = atual.rota[j];
+            const int d = atual.rota[j + 1];
+
+            // Remove (a,b) e (c,d); adiciona (a,c) e (b,d).
+            const double delta =
+                g.custo(a, c) + g.custo(b, d)
+                - g.custo(a, b) - g.custo(c, d);
+
+            if (delta < melhorDelta) {
+                melhorDelta = delta;
+                melhorInicio = i;
+                melhorFim = j;
+            }
+        }
+    }
+
+    if (melhorInicio == -1 || melhorDelta >= -EPS) {
+        return false;
+    }
+
+    std::vector<int> nova = atual.rota;
+
+    std::reverse(
+        nova.begin() + melhorInicio,
+        nova.begin() + melhorFim + 1
+    );
+
+    saida = montar_solucao(g, std::move(nova));
+    return true;
+}
+
+// Despacha o operador sorteado.
+bool gerar_vizinho(const Grafo& g,
+    const Solucao& atual,
+    Operador op,
+    std::mt19937& gerador,
+    Solucao& saida)
+{
+    switch (op) {
+    case Operador::Insercao:
+        return op_insercao_gulosa(g, atual, saida);
+
+    case Operador::Remocao:
+        return op_remocao_aleatoria(g, atual, gerador, saida);
+
+    case Operador::Troca:
+        return op_troca_aleatoria(g, atual, gerador, saida);
+
+    case Operador::DoisOpt:
+        return op_dois_opt_guloso(g, atual, saida);
+    }
+
+    return false;
+}
+
+double SA(const Grafo& g,
+    std::vector<int>& rota,
+    double tempoCorrido)
+{
+    const auto inicio = std::chrono::steady_clock::now();
+
+    // Tempo total: construcao anterior + tempo gasto dentro do SA.
+    auto tempo_atual = [&]() {
+        const double tempoSA = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - inicio
+            ).count();
+
+        return tempoCorrido + tempoSA;
+        };
+
+    validar_rota_inicial(g, rota);
+
+    Solucao atual = montar_solucao(g, rota);
+    Solucao melhor = atual;
+    Solucao vizinha;
+
+    double theta = temperatura_inicial(g);
+
+    // "n" do resfriamento: numero de pontos candidatos (sem origem e destino).
+    const int tentativasPorResfriamento =
+        std::max(1, g.numero_vertices() - 2);
+
+    std::mt19937 gerador(SEMENTE_SA);
+    std::uniform_int_distribution<int> sortearOperador(0, NUM_OPERADORES - 1);
+    std::uniform_real_distribution<double> uniforme(0.0, 1.0);
+
+    int semMelhoria = 0;   // "sem" do pseudocodigo
+    int tentativas = 0;    // "j" do pseudocodigo
+
+    while (semMelhoria < L_SA && tempo_atual() < LIMITE_TEMPO) {
+
+        // 1. VIZINHO: sorteia o operador (25% cada) e gera a candidata.
+        const Operador op =
+            static_cast<Operador>(sortearOperador(gerador));
+
+        const bool existe = gerar_vizinho(g, atual, op, gerador, vizinha);
+
+        // 2. ACEITACAO (so para movimentos viaveis).
+        if (existe) {
+            const double delta = vizinha.pontuacao - atual.pontuacao;
+
+            bool aceita = false;
+
+            if (delta > EPS) {
+                aceita = true;
+            }
+            else if (delta >= -EPS) {
+                // Pontuacao igual: aceita somente se reduzir o custo.
+                aceita = vizinha.custo < atual.custo - EPS;
+            }
+            else {
+                // Piora: aceita com probabilidade e^(delta/theta).
+                aceita = uniforme(gerador) < std::exp(delta / theta);
+            }
+
+            if (aceita) {
+                atual = std::move(vizinha);
+            }
+        }
+
+        // 3. MELHOR SOLUCAO E CONTADOR DE ESTAGNACAO.
+        // Toda tentativa conta, inclusive as descartadas.
+        if (melhor_que(atual, melhor)) {
+            melhor = atual;
+            semMelhoria = 0;
+        }
+        else {
+            ++semMelhoria;
+        }
+
+        // 4. RESFRIAMENTO a cada n tentativas.
+        ++tentativas;
+
+        if (tentativas == tentativasPorResfriamento) {
+            theta *= FATOR_RESFRIAMENTO;
+            tentativas = 0;
+        }
+    }
+
+    // Devolve a melhor solucao encontrada, nunca pior que a inicial.
+    rota = melhor.rota;
+    return melhor.pontuacao;
 }
 
