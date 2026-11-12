@@ -1,11 +1,11 @@
 #pragma once
 
-#include "Grafo.hpp"  // Ajuste para o cabeçalho do grupo.
+#include "Grafo.hpp"  // Ajuste para o cabecalho do grupo.
 #include <algorithm>
 #include <chrono>
 #include <random>
 
-// Cada função atualiza rota e retorna a pontuação dessa rota.
+// Cada funcao atualiza rota e retorna a pontuacao dessa rota.
 double ILS(
     const Grafo& g,
     std::vector<int>& rota,
@@ -17,13 +17,17 @@ double ILS(
 
 double GRASP(const Grafo& g,
     std::vector<int>& rota,
-    double tempoCorrido);
+    double tempoCorrido,
+    double alpha = 0.25,
+    unsigned int semente = 42,
+    TipoConstrucao construcaoInicial = TipoConstrucao::InsercaoGulosa
+);
 
 double SA(const Grafo& g,
     std::vector<int>& rota,
     double tempoCorrido);
 
-// Seleciona e executa a metaheurística.
+// Seleciona e executa a metaheuristica.
 double busca(const Grafo& g,
     std::vector<int>& rota,
     int meta,
