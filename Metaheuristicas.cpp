@@ -1,20 +1,41 @@
 #include "Metaheuristicas.hpp"
 #include <utility>
+#include <limits>
+
+namespace {
+void registrar_evolucao(std::vector<RegistroEvolucao>* historico,
+    double tempo, double pontuacao, double custo)
+{
+    if (!historico) return;
+    if (historico->empty() ||
+        pontuacao > historico->back().pontuacao + 1e-9 ||
+        (std::abs(pontuacao - historico->back().pontuacao) <= 1e-9 &&
+            custo < historico->back().custo - 1e-9)) {
+        historico->push_back({ tempo, pontuacao, custo });
+    }
+}
+}
 
 double busca(const Grafo& g,
     std::vector<int>& rota,
     int meta,
-    double tempoCorrido)
+    double tempoCorrido,
+    unsigned int semente,
+    TipoConstrucao construcaoInicial,
+    double rho,
+    int L,
+    double alpha,
+    std::vector<RegistroEvolucao>* historico)
 {
     switch (meta) {
     case 0:
-        return ILS(g, rota, tempoCorrido);
+        return ILS(g, rota, tempoCorrido, rho, L, semente, historico);
 
     case 1:
-        return GRASP(g, rota, tempoCorrido);
+        return GRASP(g, rota, tempoCorrido, alpha, semente, construcaoInicial, historico);
 
     case 2:
-        return SA(g, rota, tempoCorrido);
+        return SA(g, rota, tempoCorrido, semente, L, historico);
 
     default:
         throw std::invalid_argument(
@@ -22,8 +43,6 @@ double busca(const Grafo& g,
         );
     }
 }
-
-#include "busca_local.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,8 +52,12 @@ double busca_local(
     const Grafo& g,
     std::vector<int>& rota,
     double tempoCorrido,
-    const std::vector<int>& bloqueados)
+    const std::vector<int>& bloqueados,
+    std::vector<RegistroEvolucao>* historico)
 {
+    if (!std::isfinite(tempoCorrido) || tempoCorrido < 0.0) {
+        throw std::invalid_argument("O tempo corrido deve ser finito e nao negativo.");
+    }
     constexpr double EPS = 1e-9;
     constexpr double LIMITE_TEMPO = 5.0;
 
@@ -42,13 +65,14 @@ double busca_local(
 
     // Funcao auxiliar definida dentro da busca local.
     // Soma o tempo desta chamada ao tempo anteriormente gasto.
-    auto tempo_esgotado = [&]() {
+    auto tempo_atual = [&]() {
         const double tempoLocal = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - inicio
         ).count();
 
-        return tempoCorrido + tempoLocal >= LIMITE_TEMPO;
+        return tempoCorrido + tempoLocal;
         };
+    auto tempo_esgotado = [&]() { return tempo_atual() >= LIMITE_TEMPO; };
 
     const int n = g.numero_vertices();
 
@@ -105,6 +129,8 @@ double busca_local(
         );
     }
 
+    registrar_evolucao(historico, tempo_atual(), pontuacaoAtual, custoAtual);
+
     // ---------------------------------------------------------
     // 1. 2-OPT
     // Escolhe a inversao de segmento que mais reduz o custo.
@@ -153,6 +179,7 @@ double busca_local(
         );
 
         custoAtual = calcular_custo();
+        registrar_evolucao(historico, tempo_atual(), pontuacaoAtual, custoAtual);
     }
 
     // ---------------------------------------------------------
@@ -223,6 +250,7 @@ double busca_local(
         visitado[melhorVertice] = true;
         pontuacaoAtual += melhorGanho;
         custoAtual = calcular_custo();
+        registrar_evolucao(historico, tempo_atual(), pontuacaoAtual, custoAtual);
     }
 
     // ---------------------------------------------------------
@@ -296,6 +324,7 @@ double busca_local(
 
         pontuacaoAtual += melhorGanho;
         custoAtual = calcular_custo();
+        registrar_evolucao(historico, tempo_atual(), pontuacaoAtual, custoAtual);
     }
 
     return pontuacaoAtual;
@@ -307,8 +336,12 @@ double ILS(
     double tempoCorrido,
     double rho,
     int L,
-    unsigned int semente)
+    unsigned int semente,
+    std::vector<RegistroEvolucao>* historico)
 {
+    if (!std::isfinite(tempoCorrido) || tempoCorrido < 0.0) {
+        throw std::invalid_argument("O tempo corrido deve ser finito e nao negativo.");
+    }
     constexpr double EPS = 1e-9;
     constexpr double LIMITE_TEMPO = 5.0;
 
@@ -350,7 +383,9 @@ double ILS(
     double pontuacaoAtual = busca_local(
         g,
         rota,
-        tempo_atual()
+        tempo_atual(),
+        {},
+        historico
     );
 
     double custoAtual = calcular_custo(rota);
@@ -407,7 +442,8 @@ double ILS(
             g,
             candidata,
             tempo_atual(),
-            removidos
+            removidos,
+            historico
         );
 
         const double custoCandidata = calcular_custo(candidata);
@@ -558,11 +594,8 @@ double temperatura_inicial(const Grafo& g)
     return -media / std::log(0.8);
 }
 
-// Parametros do SA. Como o SA tem a assinatura fixa do .hpp,
-// os valores ficam aqui ate a etapa 7 (definicao dos parametros).
-constexpr int    L_SA = 1000;              // tentativas seguidas sem melhorar a melhor
+// Resfriamento definido no PDF. L e semente sao recebidos por parametro.
 constexpr double FATOR_RESFRIAMENTO = 0.95; // alpha do TP2
-constexpr unsigned int SEMENTE_SA = 42;     // mesma semente padrao do ILS
 
 bool aceitar_movimento(double delta,
     double custoAtual,
@@ -604,7 +637,8 @@ constexpr int NUM_OPERADORES = 4;
 // Vertices de beneficio zero nao sao considerados, como na busca_local.
 bool op_insercao_gulosa(const Grafo& g,
     const Solucao& atual,
-    Solucao& saida)
+    Solucao& saida,
+    std::chrono::steady_clock::time_point prazo)
 {
     const int n = g.numero_vertices();
     const int m = static_cast<int>(atual.rota.size());
@@ -627,6 +661,7 @@ bool op_insercao_gulosa(const Grafo& g,
         }
 
         for (int p = 1; p < m; ++p) {
+            if (std::chrono::steady_clock::now() >= prazo) return false;
             const int a = atual.rota[p - 1];
             const int b = atual.rota[p];
 
@@ -699,7 +734,8 @@ bool op_remocao_aleatoria(const Grafo& g,
 bool op_troca_aleatoria(const Grafo& g,
     const Solucao& atual,
     std::mt19937& gerador,
-    Solucao& saida)
+    Solucao& saida,
+    std::chrono::steady_clock::time_point prazo)
 {
     const int n = g.numero_vertices();
     const int m = static_cast<int>(atual.rota.size());
@@ -741,6 +777,7 @@ bool op_troca_aleatoria(const Grafo& g,
     double melhorDelta = 0.0;
 
     for (int p = 1; p < static_cast<int>(base.size()); ++p) {
+        if (std::chrono::steady_clock::now() >= prazo) return false;
         const int a = base[p - 1];
         const int b = base[p];
 
@@ -768,7 +805,8 @@ bool op_troca_aleatoria(const Grafo& g,
 // custo. Retorna false se nenhuma inversao reduzir o custo.
 bool op_dois_opt_guloso(const Grafo& g,
     const Solucao& atual,
-    Solucao& saida)
+    Solucao& saida,
+    std::chrono::steady_clock::time_point prazo)
 {
     const int m = static_cast<int>(atual.rota.size());
 
@@ -778,6 +816,7 @@ bool op_dois_opt_guloso(const Grafo& g,
 
     for (int i = 1; i < m - 2; ++i) {
         for (int j = i + 1; j < m - 1; ++j) {
+            if (std::chrono::steady_clock::now() >= prazo) return false;
             const int a = atual.rota[i - 1];
             const int b = atual.rota[i];
             const int c = atual.rota[j];
@@ -816,20 +855,22 @@ bool gerar_vizinho(const Grafo& g,
     const Solucao& atual,
     Operador op,
     std::mt19937& gerador,
-    Solucao& saida)
+    Solucao& saida,
+    std::chrono::steady_clock::time_point prazo)
 {
+    if (std::chrono::steady_clock::now() >= prazo) return false;
     switch (op) {
     case Operador::Insercao:
-        return op_insercao_gulosa(g, atual, saida);
+        return op_insercao_gulosa(g, atual, saida, prazo);
 
     case Operador::Remocao:
         return op_remocao_aleatoria(g, atual, gerador, saida);
 
     case Operador::Troca:
-        return op_troca_aleatoria(g, atual, gerador, saida);
+        return op_troca_aleatoria(g, atual, gerador, saida, prazo);
 
     case Operador::DoisOpt:
-        return op_dois_opt_guloso(g, atual, saida);
+        return op_dois_opt_guloso(g, atual, saida, prazo);
     }
 
     return false;
@@ -839,9 +880,21 @@ bool gerar_vizinho(const Grafo& g,
 
 double SA(const Grafo& g,
     std::vector<int>& rota,
-    double tempoCorrido)
+    double tempoCorrido,
+    unsigned int semente,
+    int L,
+    std::vector<RegistroEvolucao>* historico)
 {
+    if (L <= 0) {
+        throw std::invalid_argument("L deve ser positivo.");
+    }
+    if (!std::isfinite(tempoCorrido) || tempoCorrido < 0.0) {
+        throw std::invalid_argument("O tempo corrido deve ser finito e nao negativo.");
+    }
     const auto inicio = std::chrono::steady_clock::now();
+    const auto prazo = inicio + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(std::max(0.0, LIMITE_TEMPO - tempoCorrido)));
+
 
     // Tempo total: construcao anterior + tempo gasto dentro do SA.
     auto tempo_atual = [&]() {
@@ -858,25 +911,28 @@ double SA(const Grafo& g,
     Solucao melhor = atual;
     Solucao vizinha;
 
+    registrar_evolucao(historico, tempo_atual(), melhor.pontuacao, melhor.custo);
+
     double theta = temperatura_inicial(g);
 
     // "n" do resfriamento: numero de pontos candidatos (sem origem e destino).
     const int tentativasPorResfriamento =
         std::max(1, g.numero_vertices() - 2);
 
-    std::mt19937 gerador(SEMENTE_SA);
+    std::mt19937 gerador(semente);
     std::uniform_int_distribution<int> sortearOperador(0, NUM_OPERADORES - 1);
 
     int semMelhoria = 0;   // "sem" do pseudocodigo
     int tentativas = 0;    // "j" do pseudocodigo
 
-    while (semMelhoria < L_SA && tempo_atual() < LIMITE_TEMPO) {
+    while (semMelhoria < L && tempo_atual() < LIMITE_TEMPO) {
 
         // 1. VIZINHO: sorteia o operador (25% cada) e gera a candidata.
         const Operador op =
             static_cast<Operador>(sortearOperador(gerador));
 
-        const bool existe = gerar_vizinho(g, atual, op, gerador, vizinha);
+        const bool existe = gerar_vizinho(g, atual, op, gerador, vizinha, prazo);
+        if (tempo_atual() >= LIMITE_TEMPO) break;
 
         // 2. ACEITACAO (so para movimentos viaveis).
         if (existe) {
@@ -891,6 +947,7 @@ double SA(const Grafo& g,
         // Toda tentativa conta, inclusive as descartadas.
         if (melhor_que(atual, melhor)) {
             melhor = atual;
+            registrar_evolucao(historico, tempo_atual(), melhor.pontuacao, melhor.custo);
             semMelhoria = 0;
         }
         else {
@@ -947,7 +1004,8 @@ namespace {
         const Grafo& g,
         std::vector<int>& rota,
         double alpha,
-        std::mt19937& gerador)
+        std::mt19937& gerador,
+        std::chrono::steady_clock::time_point prazo)
     {
         const int n = g.numero_vertices();
         rota.clear();
@@ -971,6 +1029,9 @@ namespace {
 
             // Guarda, para cada vertice nao visitado, sua melhor posicao viavel.
             for (int v = 1; v < n - 1; ++v) {
+                if (std::chrono::steady_clock::now() >= prazo) {
+                    return pontuacao_rota_grasp(g, rota);
+                }
                 if (visitado[v]) continue;
 
                 int melhorPosicao = -1;
@@ -991,7 +1052,7 @@ namespace {
                 }
 
                 if (melhorPosicao != -1) {
-                    const double ganho = g.beneficio(v) / (menorDelta + EPS_GRASP);
+                    const double ganho = g.beneficio(v) / (std::max(0.0, menorDelta) + EPS_GRASP);
                     candidatos.push_back({ v, melhorPosicao, menorDelta, ganho });
                     ganhoMaximo = std::max(ganhoMaximo, ganho);
                     ganhoMinimo = std::min(ganhoMinimo, ganho);
@@ -1035,7 +1096,8 @@ double GRASP(
     double tempoCorrido,
     double alpha,
     unsigned int semente,
-    TipoConstrucao construcaoInicial)
+    TipoConstrucao construcaoInicial,
+    std::vector<RegistroEvolucao>* historico)
 {
     constexpr double EPS = 1e-9;
     constexpr double LIMITE_TEMPO = 5.0;
@@ -1048,6 +1110,9 @@ double GRASP(
     }
 
     const auto inicio = std::chrono::steady_clock::now();
+    const auto prazo = inicio + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(std::max(0.0, LIMITE_TEMPO - tempoCorrido)));
+
     auto tempo_atual = [&]() {
         const double tempoGRASP = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - inicio
@@ -1057,23 +1122,25 @@ double GRASP(
 
     std::mt19937 gerador(semente);
 
-    // 1. Gera a solucao inicial com uma das heuristicas de controle.
-    construir_solucao_inicial(g, rota, construcaoInicial);
+    // Usa a rota ja construida pelo chamador. Se estiver vazia,
+    // mantem a construcao interna para as chamadas existentes.
+    if (rota.empty()) construir_solucao_inicial(g, rota, construcaoInicial);
     if (rota.empty()) return 0.0;
 
     // 2. Aplica a busca local compartilhada a solucao inicial.
-    double pontuacaoMelhor = busca_local(g, rota, tempo_atual());
+    double pontuacaoMelhor = busca_local(g, rota, tempo_atual(), {}, historico);
     std::vector<int> melhorRota = rota;
     double custoMelhor = custo_rota_grasp(g, melhorRota);
 
     // 3. Constroi solucoes do zero, aplica busca local e guarda a melhor.
     while (tempo_atual() < LIMITE_TEMPO) {
         std::vector<int> candidata;
-        construcao_randomizada(g, candidata, alpha, gerador);
+        construcao_randomizada(g, candidata, alpha, gerador, prazo);
+        if (tempo_atual() >= LIMITE_TEMPO) break;
         if (candidata.empty()) break;
 
         const double pontuacaoCandidata = busca_local(
-            g, candidata, tempo_atual()
+            g, candidata, tempo_atual(), {}, historico
         );
         const double custoCandidato = custo_rota_grasp(g, candidata);
 

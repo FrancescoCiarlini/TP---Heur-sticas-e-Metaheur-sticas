@@ -87,3 +87,43 @@ double Grafo::limite_custo() const
 {
     return limiteCusto_;
 }
+
+Grafo Grafo::ler_instancia(std::istream&)
+{
+    // TODO (Fabricio): substituir este corpo pela leitura das instancias.
+    throw std::logic_error("Leitura de instancias pendente: implementacao do Fabricio.");
+}
+
+double Grafo::custo_rota(const std::vector<int>& rota) const
+{
+    double total = 0.0;
+    for (std::size_t p = 1; p < rota.size(); ++p) {
+        total += custo(rota[p - 1], rota[p]);
+    }
+    return total;
+}
+
+double Grafo::pontuacao_rota(const std::vector<int>& rota) const
+{
+    double total = 0.0;
+    for (int v : rota) {
+        total += beneficio(v);
+    }
+    return total;
+}
+
+bool Grafo::rota_viavel(const std::vector<int>& rota) const
+{
+    if (rota.size() < 2 || rota.front() != origem() || rota.back() != destino()) {
+        return false;
+    }
+    std::vector<bool> visitado(numero_vertices(), false);
+    for (int v : rota) {
+        if (v < 0 || v >= numero_vertices() || visitado[v]) {
+            return false;
+        }
+        visitado[v] = true;
+    }
+    const double total = custo_rota(rota);
+    return std::isfinite(total) && total <= limite_custo() + 1e-9;
+}
