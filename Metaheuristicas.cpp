@@ -569,7 +569,24 @@ constexpr int    L_SA = 1000;              // tentativas seguidas sem melhorar a
 constexpr double FATOR_RESFRIAMENTO = 0.95; // alpha do TP2
 constexpr unsigned int SEMENTE_SA = 42;     // mesma semente padrao do ILS
 
-} // namespace
+bool aceitar_movimento(double delta,
+    double custoAtual,
+    double custoVizinha,
+    double theta,
+    std::mt19937& gerador)
+{
+    if (delta > EPS) {
+        return true;
+    }
+
+    if (delta >= -EPS) {
+        return custoVizinha < custoAtual - EPS;
+    }
+
+    std::uniform_real_distribution<double> uniforme(0.0, 1.0);
+
+    return uniforme(gerador) < std::exp(delta / theta);
+}
 
 // ---------------------------------------------------------------
 // OPERADORES DE VIZINHANCA DO SA
@@ -823,6 +840,8 @@ bool gerar_vizinho(const Grafo& g,
     return false;
 }
 
+} // namespace
+
 double SA(const Grafo& g,
     std::vector<int>& rota,
     double tempoCorrido)
@@ -852,7 +871,6 @@ double SA(const Grafo& g,
 
     std::mt19937 gerador(SEMENTE_SA);
     std::uniform_int_distribution<int> sortearOperador(0, NUM_OPERADORES - 1);
-    std::uniform_real_distribution<double> uniforme(0.0, 1.0);
 
     int semMelhoria = 0;   // "sem" do pseudocodigo
     int tentativas = 0;    // "j" do pseudocodigo
@@ -869,21 +887,7 @@ double SA(const Grafo& g,
         if (existe) {
             const double delta = vizinha.pontuacao - atual.pontuacao;
 
-            bool aceita = false;
-
-            if (delta > EPS) {
-                aceita = true;
-            }
-            else if (delta >= -EPS) {
-                // Pontuacao igual: aceita somente se reduzir o custo.
-                aceita = vizinha.custo < atual.custo - EPS;
-            }
-            else {
-                // Piora: aceita com probabilidade e^(delta/theta).
-                aceita = uniforme(gerador) < std::exp(delta / theta);
-            }
-
-            if (aceita) {
+            if (aceitar_movimento(delta, atual.custo, vizinha.custo, theta, gerador)) {
                 atual = std::move(vizinha);
             }
         }
