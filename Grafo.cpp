@@ -1,4 +1,7 @@
 #include "Grafo.hpp"
+#include <sstream>
+#include <string>
+#include <algorithm>
 
 Grafo::Grafo(const std::vector<Vertice>& vertices, double limiteCusto)
     : vertices_(vertices),
@@ -88,10 +91,126 @@ double Grafo::limite_custo() const
     return limiteCusto_;
 }
 
-Grafo Grafo::ler_instancia(std::istream&)
+Grafo Grafo::ler_instancia(std::istream& entrada)
 {
-    // TODO (Fabricio): substituir este corpo pela leitura das instancias.
-    throw std::logic_error("Leitura de instancias pendente: implementacao do Fabricio.");
+    std::string linha;
+    std::vector<Vertice> vertices;
+    double limiteCusto = -1.0;
+    bool isOPLib = false;
+
+    // Lê a primeira linha não vazia para identificar a assinatura do formato
+    while (std::getline(entrada, linha)) {
+        if (linha.empty() || linha.find_first_not_of(" \r\n\t") == std::string::npos) continue;
+        
+        std::string linhaUpper = linha;
+        std::transform(linhaUpper.begin(), linhaUpper.end(), linhaUpper.begin(), ::toupper);
+        
+        if (linhaUpper.find("NAME") != std::string::npos || 
+            linhaUpper.find("TYPE") != std::string::npos || 
+            linhaUpper.find("DIMENSION") != std::string::npos) 
+        {
+            isOPLib = true;
+        }
+        break;
+    }
+
+    if (!isOPLib) {
+        // --- Formato KU Leuven (Tsiligirides, Chao) ---
+        std::istringstream iss(linha);
+        if (!(iss >> limiteCusto)) {
+            throw std::invalid_argument("Erro ao ler limite de custo (KU Leuven).");
+        }
+        
+        int n = 0;
+        // O número de vértices pode estar na mesma linha do Tmax ou na linha seguinte
+        if (!(iss >> n)) {
+            if (!(entrada >> n)) throw std::invalid_argument("Erro ao ler numero de vertices.");
+        }
+
+        for (int i = 0; i < n; ++i) {
+            double x, y, s;
+            if (!(entrada >> x >> y >> s)) {
+                throw std::invalid_argument("Dados de vertice incompletos (KU Leuven).");
+            }
+            vertices.push_back({x, y, s});
+        }
+
+        if (vertices.size() < 2) {
+            throw std::invalid_argument("A instancia deve ter pelo menos origem e destino.");
+        }
+
+        // KU Leuven define o vertice na linha 2 (índice 1) como destino final.
+        // Movemos ele para o fim do vetor para alinhar com a logica do projeto (N-1).
+        Vertice destino = vertices[1];
+        vertices.erase(vertices.begin() + 1);
+        vertices.push_back(destino);
+
+    } else {
+        // --- Formato OPLib (Derivado do TSPLib) ---
+        int dimension = 0;
+        
+        auto extrair_valor = [](const std::string& l) -> std::string {
+            auto pos = l.find(':');
+            if (pos == std::string::npos) return "";
+            std::string val = l.substr(pos + 1);
+            val.erase(0, val.find_first_not_of(" \t"));
+            val.erase(val.find_last_not_of(" \r\n\t") + 1);
+            return val;
+        };
+
+        // Processa cabeçalho
+        do {
+            std::string lUpper = linha;
+            std::transform(lUpper.begin(), lUpper.end(), lUpper.begin(), ::toupper);
+            
+            if (lUpper.find("COST_LIMIT") != std::string::npos || 
+                lUpper.find("TMAX") != std::string::npos) 
+            {
+                limiteCusto = std::stod(extrair_valor(linha));
+            }
+            else if (lUpper.find("DIMENSION") != std::string::npos) {
+                dimension = std::stoi(extrair_valor(linha));
+            }
+            else if (lUpper.find("NODE_COORD_SECTION") != std::string::npos) {
+                break;
+            }
+        } while (std::getline(entrada, linha));
+
+        if (dimension < 2) throw std::invalid_argument("Dimensao invalida na OPLib.");
+        
+        vertices.resize(dimension);
+        
+        // Coordenadas
+        for (int i = 0; i < dimension; ++i) {
+            int id; double x, y;
+            if (!(entrada >> id >> x >> y)) {
+                throw std::invalid_argument("Erro ao ler NODE_COORD_SECTION (OPLib).");
+            }
+            // Vetor indexado em 0, IDs começam em 1
+            vertices[id - 1].x = x;
+            vertices[id - 1].y = y;
+            vertices[id - 1].beneficio = 0.0;
+        }
+
+        // Pontuações
+        while (entrada >> linha) {
+            std::string lUpper = linha;
+            std::transform(lUpper.begin(), lUpper.end(), lUpper.begin(), ::toupper);
+            if (lUpper.find("SCORE_SECTION") != std::string::npos) break;
+        }
+        
+        for (int i = 0; i < dimension; ++i) {
+            int id; double s;
+            if (!(entrada >> id >> s)) break; 
+            vertices[id - 1].beneficio = s;
+        }
+        
+        if (limiteCusto < 0) {
+            throw std::invalid_argument("Limite de custo nao encontrado na OPLib.");
+        }
+    }
+
+    return Grafo(vertices, limiteCusto);
 }
 
 double Grafo::custo_rota(const std::vector<int>& rota) const
