@@ -916,3 +916,184 @@ double SA(const Grafo& g,
     return melhor.pontuacao;
 }
 
+// -------------------------------------------------------------
+// CONSTRUCAO RANDOMIZADA DO GRASP
+// -------------------------------------------------------------
+namespace {
+    constexpr double EPS_GRASP = 1e-9;
+
+    struct CandidatoGRASP {
+        int vertice;
+        int posicao;
+        double delta;
+        double ganho;
+    };
+
+    double custo_rota_grasp(const Grafo& g, const std::vector<int>& rota)
+    {
+        double total = 0.0;
+        for (int p = 1; p < static_cast<int>(rota.size()); ++p) {
+            total += g.custo(rota[p - 1], rota[p]);
+        }
+        return total;
+    }
+
+    double pontuacao_rota_grasp(const Grafo& g, const std::vector<int>& rota)
+    {
+        double total = 0.0;
+        for (int v : rota) {
+            total += g.beneficio(v);
+        }
+        return total;
+    }
+
+    // Implementa o procedimento ConstrucaoRandomizada.
+    double construcao_randomizada(
+        const Grafo& g,
+        std::vector<int>& rota,
+        double alpha,
+        std::mt19937& gerador)
+    {
+        const int n = g.numero_vertices();
+        rota.clear();
+
+        // A rota inicial contem somente origem e destino.
+        if (g.custo(g.origem(), g.destino()) > g.limite_custo() + EPS_GRASP) {
+            return 0.0;
+        }
+
+        rota = { g.origem(), g.destino() };
+        std::vector<bool> visitado(n, false);
+        visitado[g.origem()] = true;
+        visitado[g.destino()] = true;
+
+        double custoAtual = g.custo(g.origem(), g.destino());
+
+        while (true) {
+            std::vector<CandidatoGRASP> candidatos;
+            double ganhoMaximo = -std::numeric_limits<double>::infinity();
+            double ganhoMinimo = std::numeric_limits<double>::infinity();
+
+            // Guarda, para cada vertice nao visitado, sua melhor posicao viavel.
+            for (int v = 1; v < n - 1; ++v) {
+                if (visitado[v]) continue;
+
+                int melhorPosicao = -1;
+                double menorDelta = std::numeric_limits<double>::infinity();
+
+                for (int p = 1; p < static_cast<int>(rota.size()); ++p) {
+                    const int a = rota[p - 1];
+                    const int b = rota[p];
+                    const double delta =
+                        g.custo(a, v) + g.custo(v, b) - g.custo(a, b);
+
+                    if (custoAtual + delta <= g.limite_custo() + EPS_GRASP &&
+                        delta < menorDelta)
+                    {
+                        menorDelta = delta;
+                        melhorPosicao = p;
+                    }
+                }
+
+                if (melhorPosicao != -1) {
+                    const double ganho = g.beneficio(v) / (menorDelta + EPS_GRASP);
+                    candidatos.push_back({ v, melhorPosicao, menorDelta, ganho });
+                    ganhoMaximo = std::max(ganhoMaximo, ganho);
+                    ganhoMinimo = std::min(ganhoMinimo, ganho);
+                }
+            }
+
+            if (candidatos.empty()) break;
+
+            // LRC = { i | g_i >= g_max - alpha * (g_max - g_min) }.
+            const double limiteLRC =
+                ganhoMaximo - alpha * (ganhoMaximo - ganhoMinimo);
+
+            std::vector<CandidatoGRASP> LRC;
+            for (const CandidatoGRASP& candidato : candidatos) {
+                if (candidato.ganho + EPS_GRASP >= limiteLRC) {
+                    LRC.push_back(candidato);
+                }
+            }
+
+            // Escolhe uniformemente um candidato da LRC.
+            std::uniform_int_distribution<int> sortear(
+                0, static_cast<int>(LRC.size()) - 1
+            );
+            const CandidatoGRASP escolhido = LRC[sortear(gerador)];
+
+            rota.insert(rota.begin() + escolhido.posicao, escolhido.vertice);
+            visitado[escolhido.vertice] = true;
+            custoAtual += escolhido.delta;
+        }
+
+        return pontuacao_rota_grasp(g, rota);
+    }
+}
+
+// -------------------------------------------------------------
+// GREEDY RANDOMIZED ADAPTIVE SEARCH PROCEDURE (GRASP)
+// -------------------------------------------------------------
+double GRASP(
+    const Grafo& g,
+    std::vector<int>& rota,
+    double tempoCorrido,
+    double alpha,
+    unsigned int semente,
+    TipoConstrucao construcaoInicial)
+{
+    constexpr double EPS = 1e-9;
+    constexpr double LIMITE_TEMPO = 5.0;
+
+    if (!std::isfinite(alpha) || alpha < 0.0 || alpha > 1.0) {
+        throw std::invalid_argument("alpha deve estar entre 0 e 1.");
+    }
+    if (!std::isfinite(tempoCorrido) || tempoCorrido < 0.0) {
+        throw std::invalid_argument("O tempo corrido deve ser finito e nao negativo.");
+    }
+
+    const auto inicio = std::chrono::steady_clock::now();
+    auto tempo_atual = [&]() {
+        const double tempoGRASP = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - inicio
+        ).count();
+        return tempoCorrido + tempoGRASP;
+    };
+
+    std::mt19937 gerador(semente);
+
+    // 1. Gera a solucao inicial com uma das heuristicas de controle.
+    construir_solucao_inicial(g, rota, construcaoInicial);
+    if (rota.empty()) return 0.0;
+
+    // 2. Aplica a busca local compartilhada a solucao inicial.
+    double pontuacaoMelhor = busca_local(g, rota, tempo_atual());
+    std::vector<int> melhorRota = rota;
+    double custoMelhor = custo_rota_grasp(g, melhorRota);
+
+    // 3. Constroi solucoes do zero, aplica busca local e guarda a melhor.
+    while (tempo_atual() < LIMITE_TEMPO) {
+        std::vector<int> candidata;
+        construcao_randomizada(g, candidata, alpha, gerador);
+        if (candidata.empty()) break;
+
+        const double pontuacaoCandidata = busca_local(
+            g, candidata, tempo_atual()
+        );
+        const double custoCandidato = custo_rota_grasp(g, candidata);
+
+        const bool melhorou =
+            pontuacaoCandidata > pontuacaoMelhor + EPS ||
+            (std::abs(pontuacaoCandidata - pontuacaoMelhor) <= EPS &&
+                custoCandidato < custoMelhor - EPS);
+
+        if (melhorou) {
+            melhorRota = candidata;
+            pontuacaoMelhor = pontuacaoCandidata;
+            custoMelhor = custoCandidato;
+        }
+    }
+
+    rota = melhorRota;
+    return pontuacaoMelhor;
+}
