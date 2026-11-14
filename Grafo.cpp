@@ -117,30 +117,40 @@ Grafo Grafo::ler_instancia(std::istream& entrada)
     if (!isOPLib) {
         // --- Formato KU Leuven (Tsiligirides, Chao) ---
         std::istringstream iss(linha);
-        if (!(iss >> limiteCusto)) {
+
+        int numeroCaminhos = 0;
+
+        if (!(iss >> limiteCusto >> numeroCaminhos)) {
             throw std::invalid_argument("Erro ao ler limite de custo (KU Leuven).");
         }
-        
-        int n = 0;
-        // O número de vértices pode estar na mesma linha do Tmax ou na linha seguinte
-        if (!(iss >> n)) {
-            if (!(entrada >> n)) throw std::invalid_argument("Erro ao ler numero de vertices.");
+
+        if (numeroCaminhos != 1) {
+            throw std::invalid_argument("Este projeto trabalha com uma unica rota.");
         }
 
-        for (int i = 0; i < n; ++i) {
-            double x, y, s;
-            if (!(entrada >> x >> y >> s)) {
-                throw std::invalid_argument("Dados de vertice incompletos (KU Leuven).");
+        // Lê todos os pontos: x, y e benefício.
+        while (std::getline(entrada, linha)) {
+            if (linha.find_first_not_of(" \r\n\t") == std::string::npos) {
+                continue;
             }
-            vertices.push_back({x, y, s});
+        
+            std::istringstream ponto(linha);
+
+            double x, y, beneficio;
+
+            if (!(ponto >> x >> y >> beneficio)) {
+                continue;
+            }
+            vertices.push_back({x, y, beneficio});
         }
 
         if (vertices.size() < 2) {
-            throw std::invalid_argument("A instancia deve ter pelo menos origem e destino.");
+            throw std::invalid_argument("A instancia precisa ter origem e destino.");
         }
 
-        // KU Leuven define o vertice na linha 2 (índice 1) como destino final.
-        // Movemos ele para o fim do vetor para alinhar com a logica do projeto (N-1).
+        // O primeiro ponto é a origem.
+        // O segundo ponto é o destino.
+        // Movemos o destino para o final do vetor.
         Vertice destino = vertices[1];
         vertices.erase(vertices.begin() + 1);
         vertices.push_back(destino);
